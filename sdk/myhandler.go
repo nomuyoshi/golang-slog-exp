@@ -1,6 +1,9 @@
 package sdk
 
-import "log/slog"
+import (
+	"context"
+	"log/slog"
+)
 
 type (
 	MyHandler struct {
@@ -19,4 +22,13 @@ func NewMyHandler(opt *Options) *MyHandler {
 	return &MyHandler{
 		opts: *opt,
 	}
+}
+
+func (h *MyHandler) Enabled(_ context.Context, l slog.Level) bool {
+	minLevel := slog.LevelInfo
+	if h.opts.Level != nil {
+		minLevel = h.opts.Level.Level()
+	}
+
+	return l >= minLevel
 }
