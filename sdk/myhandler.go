@@ -1,7 +1,6 @@
 package sdk
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -47,7 +46,9 @@ func (h *MyHandler) Enabled(_ context.Context, l slog.Level) bool {
 //   - TODO: If a group has no Attrs (even if it has a non-empty key),
 //     ignore it.
 func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
-	output := newOutput(new(bytes.Buffer))
+	output := newOutput()
+	defer output.free()
+
 	output.buf.WriteByte('{')
 
 	if !r.Time.IsZero() {
@@ -62,16 +63,20 @@ func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
 	output.buf.WriteByte('}')
 	output.buf.WriteByte('\n')
 
-	_, err := h.w.Write(output.buf.Bytes())
+	_, err := h.w.Write(*output.buf)
 	return err
 }
 
 type output struct {
-	buf *bytes.Buffer
+	buf *Buffer
 }
 
-func newOutput(buf *bytes.Buffer) *output {
-	return &output{buf: buf}
+func newOutput() *output {
+	return &output{buf: NewBuffer()}
+}
+
+func (o *output) free() {
+	o.buf.Free()
 }
 
 func (o *output) appendKey(key string) {
