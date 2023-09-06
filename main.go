@@ -4,7 +4,7 @@ import (
 	"os"
 	"slogexp/sdk"
 
-	"golang.org/x/exp/slog"
+	"log/slog"
 )
 
 func main() {

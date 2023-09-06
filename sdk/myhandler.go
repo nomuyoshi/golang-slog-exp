@@ -9,8 +9,9 @@ import (
 
 type (
 	MyHandler struct {
-		opts Options
-		w    io.Writer
+		opts   Options
+		groups []string // all groups started from WithGroup
+		w      io.Writer
 	}
 
 	Options struct {
@@ -36,62 +37,71 @@ func (h *MyHandler) Enabled(_ context.Context, l slog.Level) bool {
 	return l >= minLevel
 }
 
-// Handle methods that produce output should observe the following rules:
-//   - If r.Time is the zero time, ignore the time.
-//   - TODO: If r.PC is zero, ignore it.
-//   - TODO: Attr's values should be resolved.
-//   - TODO: If an Attr's key and value are both the zero value, ignore the Attr.
-//     This can be tested with attr.Equal(Attr{}).
-//   - TODO: If a group's key is empty, inline the group's Attrs.
-//   - TODO: If a group has no Attrs (even if it has a non-empty key),
-//     ignore it.
+// Handle https://pkg.go.dev/golang.org/x/exp/slog#Handler
+// まだGroupなどの扱いを実装していない
 func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
-	output := newOutput()
-	defer output.free()
+	state := newHandleState()
+	defer state.free()
 
-	output.buf.WriteByte('{')
+	state.buf.WriteByte('{')
 
 	if !r.Time.IsZero() {
-		output.appendKey(slog.TimeKey)
-		output.appendTime(r.Time)
+		state.appendKey(slog.TimeKey)
+		state.appendTime(r.Time)
 	}
-	output.appendKey(slog.LevelKey)
-	output.appendString(r.Level.String())
+	state.appendKey(slog.LevelKey)
+	state.appendString(r.Level.String())
 
-	output.appendKey(slog.MessageKey)
-	output.appendString(r.Message)
-	output.buf.WriteByte('}')
-	output.buf.WriteByte('\n')
+	state.appendKey(slog.MessageKey)
+	state.appendString(r.Message)
+	state.buf.WriteByte('}')
+	state.buf.WriteByte('\n')
 
-	_, err := h.w.Write(*output.buf)
+	_, err := h.w.Write(*state.buf)
 	return err
 }
 
-type output struct {
+func (h *MyHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *MyHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+
+	return &MyHandler{
+		opts:   h.opts,
+		groups: append(h.groups, name),
+		w:      h.w,
+	}
+}
+
+type handleState struct {
 	buf *Buffer
 }
 
-func newOutput() *output {
-	return &output{buf: NewBuffer()}
+func newHandleState() *handleState {
+	return &handleState{buf: NewBuffer()}
 }
 
-func (o *output) free() {
-	o.buf.Free()
+func (s *handleState) free() {
+	s.buf.Free()
 }
 
-func (o *output) appendKey(key string) {
-	o.appendString(key)
-	o.buf.WriteByte(':')
+func (s *handleState) appendKey(key string) {
+	s.appendString(key)
+	s.buf.WriteByte(':')
 }
 
-func (o *output) appendString(str string) {
-	o.buf.WriteByte('"')
-	o.buf.WriteString(str) // TODO strをescape
-	o.buf.WriteByte('"')
+func (s *handleState) appendString(str string) {
+	s.buf.WriteByte('"')
+	s.buf.WriteString(str) // TODO strをescape
+	s.buf.WriteByte('"')
 }
 
-func (o *output) appendTime(t time.Time) {
-	o.buf.WriteByte('"')
-	o.buf.WriteString(t.Format(time.RFC3339Nano))
-	o.buf.WriteByte('"')
+func (s *handleState) appendTime(t time.Time) {
+	s.buf.WriteByte('"')
+	s.buf.WriteString(t.Format(time.RFC3339Nano))
+	s.buf.WriteByte('"')
 }
