@@ -1,19 +1,27 @@
 package sdk
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
+
+	"slices"
 )
 
 type (
 	MyHandler struct {
-		opts   Options
-		groups []string // all groups started from WithGroup
-		w      io.Writer
-		mu     *sync.Mutex
+		opts              Options
+		preformattedAttrs []byte
+		groups            []string // all groups started from WithGroup
+		nOpenGroups       int      // the number of groups opened in preformattedAttrs
+		mu                *sync.Mutex
+		w                 io.Writer
 	}
 
 	Options struct {
@@ -59,6 +67,7 @@ func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	state.appendKey(slog.MessageKey)
 	state.appendString(r.Message)
+	state.appendNonBuiltIns(r)
 	state.buf.WriteByte('}')
 	state.buf.WriteByte('\n')
 
@@ -79,9 +88,12 @@ func (h *MyHandler) WithGroup(name string) slog.Handler {
 	}
 
 	return &MyHandler{
-		opts:   h.opts,
-		groups: append(h.groups, name),
-		w:      h.w,
+		opts:              h.opts,
+		preformattedAttrs: slices.Clip(h.preformattedAttrs),
+		groups:            slices.Clip(h.groups),
+		nOpenGroups:       h.nOpenGroups,
+		w:                 h.w,
+		mu:                h.mu,
 	}
 }
 
@@ -122,4 +134,108 @@ func (s *handleState) appendTime(t time.Time) {
 	s.buf.WriteByte('"')
 	s.buf.WriteString(t.Format(time.RFC3339Nano))
 	s.buf.WriteByte('"')
+}
+
+// appendNonBuiltIns 組み込みの値・項目（time, level, msg）以外を handleState.buf にappend
+func (s *handleState) appendNonBuiltIns(r slog.Record) {
+	if r.NumAttrs() > 0 {
+		// TODO 色々
+		r.Attrs(func(a slog.Attr) bool {
+			s.appendAttr(a)
+			return true
+		})
+	}
+}
+
+func (s *handleState) appendAttr(a slog.Attr) {
+	a.Value = a.Value.Resolve()
+	if isEmpty(a) {
+		return
+	}
+
+	// TODO Source Case
+	if a.Value.Kind() == slog.KindGroup { // Groupだった場合
+		attrs := a.Value.Group()
+		if len(attrs) > 0 {
+			if a.Key != "" {
+				s.openGroup(a.Key) // Group開始（`{`)
+			}
+			for _, aa := range attrs {
+				s.appendAttr(aa) // Group内にattrsを書き込む
+			}
+			if a.Key != "" {
+				s.closeGroup()
+			}
+
+		}
+	} else {
+		s.appendKey(a.Key)
+		s.appendValue(a.Value)
+	}
+}
+
+func (s *handleState) appendError(err error) {
+	s.appendString(fmt.Sprintf("!ERROR:%v", err))
+}
+
+func isEmpty(a slog.Attr) bool {
+	return a.Equal(slog.Attr{})
+}
+
+func (s *handleState) appendValue(v slog.Value) {
+	var err error
+	switch v.Kind() {
+	case slog.KindString:
+		s.appendString(v.String())
+	case slog.KindInt64:
+		*s.buf = strconv.AppendInt(*s.buf, v.Int64(), 10)
+	case slog.KindUint64:
+		*s.buf = strconv.AppendUint(*s.buf, v.Uint64(), 10)
+	case slog.KindFloat64:
+		*s.buf = strconv.AppendFloat(*s.buf, v.Float64(), 'E', -1, 64)
+	case slog.KindBool:
+		*s.buf = strconv.AppendBool(*s.buf, v.Bool())
+	case slog.KindDuration:
+		*s.buf = strconv.AppendInt(*s.buf, int64(v.Duration()), 10)
+	case slog.KindTime:
+		s.appendTime(v.Time())
+	case slog.KindAny: // nilや元となる型が数値のNamed Typeを含む上記のcase以外の全ての型はKindAnyになる
+		a := v.Any()
+		_, jm := a.(json.Marshaler)
+		if e, ok := a.(error); ok && !jm {
+			err = e
+		} else {
+			err = appendJSONMarshal(s.buf, a) // 何が来るかわからんのでencoding/jsonを使ってEncode
+		}
+	default:
+		panic(fmt.Sprintf("bad kind: %s", v.Kind()))
+	}
+
+	if err != nil {
+		s.appendError(err)
+	}
+}
+
+func (s *handleState) openGroup(name string) {
+	s.appendKey(name)
+	s.buf.WriteByte('{')
+	s.sep = "" // 空にしないとGroup内の1番目のキーの前にカンマが入っちゃう {"group":{,"key1": 1}}
+}
+
+func (s *handleState) closeGroup() {
+	s.buf.WriteByte('}')
+	s.sep = sep
+}
+
+func appendJSONMarshal(buf *Buffer, v any) error {
+	// Use a json.Encoder to avoid escaping HTML.
+	var bb bytes.Buffer
+	enc := json.NewEncoder(&bb)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	bs := bb.Bytes()
+	buf.Write(bs[:len(bs)-1]) // 末尾の改行コードを削除
+	return nil
 }
