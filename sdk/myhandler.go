@@ -56,7 +56,7 @@ func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
 	state := h.newHandleState(NewBuffer())
 	defer state.free()
 
-	state.buf.WriteByte('{')
+	state.buf.WriteByte('{') // Open the top-level object
 
 	if !r.Time.IsZero() {
 		state.appendKey(slog.TimeKey)
@@ -68,7 +68,7 @@ func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
 	state.appendKey(slog.MessageKey)
 	state.appendString(r.Message)
 	state.appendNonBuiltIns(r)
-	state.buf.WriteByte('}')
+	state.buf.WriteByte('}') // Close the top-level object
 	state.buf.WriteByte('\n')
 
 	h.mu.Lock()
@@ -83,10 +83,15 @@ func (h *MyHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 }
 
 func (h *MyHandler) WithGroup(name string) slog.Handler {
-	if name == "" {
-		return h
-	}
+	h2 := h.clone()
+	h2.groups = append(h2.groups, name)
 
+	return h2
+}
+
+func (h *MyHandler) clone() *MyHandler {
+	// 1.21で追加されたslicesが使われている
+	// slices.Clip スライスの不必要なcapを削ってくれる
 	return &MyHandler{
 		opts:              h.opts,
 		preformattedAttrs: slices.Clip(h.preformattedAttrs),
@@ -100,12 +105,14 @@ func (h *MyHandler) WithGroup(name string) slog.Handler {
 const sep = ","
 
 type handleState struct {
+	h   *MyHandler
 	buf *Buffer
 	sep string // 各値の区切り文字
 }
 
 func (h *MyHandler) newHandleState(buf *Buffer) handleState {
 	s := handleState{
+		h:   h,
 		buf: buf,
 	}
 	return s
@@ -138,12 +145,21 @@ func (s *handleState) appendTime(t time.Time) {
 
 // appendNonBuiltIns 組み込みの値・項目（time, level, msg）以外を handleState.buf にappend
 func (s *handleState) appendNonBuiltIns(r slog.Record) {
+	nOpenGroups := s.h.nOpenGroups
+	fmt.Printf("[DEBUG] s.h.nOpenGroups = %d\n", s.h.nOpenGroups)
 	if r.NumAttrs() > 0 {
-		// TODO 色々
+		s.openGroups()
+		nOpenGroups = len(s.h.groups)
+		fmt.Printf("[DEBUG] len(s.h.groups) = %d\n", nOpenGroups)
 		r.Attrs(func(a slog.Attr) bool {
 			s.appendAttr(a)
 			return true
 		})
+	}
+	// close groups
+	// オープンしたグループ分（nOpenGroups）括弧を閉じる
+	for range s.h.groups[:nOpenGroups] {
+		s.buf.WriteByte('}')
 	}
 }
 
@@ -220,6 +236,12 @@ func (s *handleState) openGroup(name string) {
 	s.appendKey(name)
 	s.buf.WriteByte('{')
 	s.sep = "" // 空にしないとGroup内の1番目のキーの前にカンマが入っちゃう {"group":{,"key1": 1}}
+}
+
+func (s *handleState) openGroups() {
+	for _, n := range s.h.groups[s.h.nOpenGroups:] {
+		s.openGroup(n)
+	}
 }
 
 func (s *handleState) closeGroup() {
