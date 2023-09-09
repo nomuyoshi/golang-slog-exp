@@ -17,7 +17,7 @@ import (
 type (
 	MyHandler struct {
 		opts              Options
-		preformattedAttrs []byte
+		preformattedAttrs []byte   // MEMO なにこれ??????????
 		groups            []string // all groups started from WithGroup
 		nOpenGroups       int      // the number of groups opened in preformattedAttrs
 		mu                *sync.Mutex
@@ -53,7 +53,7 @@ func (h *MyHandler) Enabled(_ context.Context, l slog.Level) bool {
 // Handle https://pkg.go.dev/golang.org/x/exp/slog#Handler
 // まだGroupなどの扱いを実装していない
 func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
-	state := h.newHandleState(NewBuffer())
+	state := h.newHandleState(NewBuffer(), true)
 	defer state.free()
 
 	state.buf.WriteByte('{') // Open the top-level object
@@ -79,7 +79,27 @@ func (h *MyHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func (h *MyHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return h
+	// 空のグループのみなら何もしない
+	if countEmptyGroups(attrs) == len(attrs) {
+		return h
+	}
+	h2 := h.clone()
+	// state.bufはpreformattedAttrsのポインタ
+	state := h2.newHandleState((*Buffer)(&h2.preformattedAttrs), false)
+	defer state.free()
+
+	if len(h2.preformattedAttrs) > 0 {
+		state.sep = sep
+	}
+	state.openGroups()
+
+	for _, a := range attrs {
+		// newHandleStateにpreformattedAttrsのポインタを渡しているから
+		// Attr をs.bufに書き込む = s.preformattedAttrs にも書き込まれる
+		state.appendAttr(a)
+	}
+	h2.nOpenGroups = len(h2.groups)
+	return h2
 }
 
 func (h *MyHandler) WithGroup(name string) slog.Handler {
@@ -105,21 +125,25 @@ func (h *MyHandler) clone() *MyHandler {
 const sep = ","
 
 type handleState struct {
-	h   *MyHandler
-	buf *Buffer
-	sep string // 各値の区切り文字
+	h       *MyHandler
+	buf     *Buffer
+	freeBuf bool
+	sep     string // 各値の区切り文字
 }
 
-func (h *MyHandler) newHandleState(buf *Buffer) handleState {
+func (h *MyHandler) newHandleState(buf *Buffer, freeBuf bool) handleState {
 	s := handleState{
-		h:   h,
-		buf: buf,
+		h:       h,
+		buf:     buf,
+		freeBuf: freeBuf,
 	}
 	return s
 }
 
 func (s *handleState) free() {
-	s.buf.Free()
+	if s.freeBuf {
+		s.buf.Free()
+	}
 }
 
 func (s *handleState) appendKey(key string) {
@@ -145,12 +169,16 @@ func (s *handleState) appendTime(t time.Time) {
 
 // appendNonBuiltIns 組み込みの値・項目（time, level, msg）以外を handleState.buf にappend
 func (s *handleState) appendNonBuiltIns(r slog.Record) {
+	if len(s.h.preformattedAttrs) > 0 {
+		s.buf.WriteString(s.sep)
+		s.buf.Write(s.h.preformattedAttrs)
+		s.sep = sep
+	}
+
 	nOpenGroups := s.h.nOpenGroups
-	fmt.Printf("[DEBUG] s.h.nOpenGroups = %d\n", s.h.nOpenGroups)
 	if r.NumAttrs() > 0 {
 		s.openGroups()
 		nOpenGroups = len(s.h.groups)
-		fmt.Printf("[DEBUG] len(s.h.groups) = %d\n", nOpenGroups)
 		r.Attrs(func(a slog.Attr) bool {
 			s.appendAttr(a)
 			return true
@@ -192,10 +220,6 @@ func (s *handleState) appendAttr(a slog.Attr) {
 
 func (s *handleState) appendError(err error) {
 	s.appendString(fmt.Sprintf("!ERROR:%v", err))
-}
-
-func isEmpty(a slog.Attr) bool {
-	return a.Equal(slog.Attr{})
 }
 
 func (s *handleState) appendValue(v slog.Value) {
@@ -260,4 +284,31 @@ func appendJSONMarshal(buf *Buffer, v any) error {
 	bs := bb.Bytes()
 	buf.Write(bs[:len(bs)-1]) // 末尾の改行コードを削除
 	return nil
+}
+
+func isEmpty(a slog.Attr) bool {
+	return a.Equal(slog.Attr{})
+}
+
+// isEmptyGroup reports whether v is a group that has no attributes.
+func isEmptyGroup(v slog.Value) bool {
+	if v.Kind() != slog.KindGroup {
+		return false
+	}
+	// We do not need to recursively examine the group's Attrs for emptiness,
+	// because GroupValue removed them when the group was constructed, and
+	// groups are immutable.
+	attrs := v.Any().([]slog.Attr)
+	return len(attrs) == 0
+}
+
+// countEmptyGroups returns the number of empty group values in its argument.
+func countEmptyGroups(as []slog.Attr) int {
+	n := 0
+	for _, a := range as {
+		if isEmptyGroup(a.Value) {
+			n++
+		}
+	}
+	return n
 }

@@ -31,9 +31,8 @@ func (b *Buffer) Free() {
 	}
 }
 
-func (b *Buffer) Write(p []byte) (int, error) {
+func (b *Buffer) Write(p []byte) {
 	*b = append(*b, p...)
-	return len(p), nil
 }
 
 func (b *Buffer) WriteByte(c byte) {
